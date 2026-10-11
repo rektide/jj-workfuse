@@ -108,7 +108,7 @@ impl ReadOnlyFs {
             let name = node
                 .path
                 .components()
-                .last()
+                .next_back()
                 .expect("child has basename")
                 .as_internal_str()
                 .to_owned();
