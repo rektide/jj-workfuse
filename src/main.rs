@@ -188,10 +188,10 @@ fn main() -> Result<()> {
             )?;
             let mut unmounter = session.unmount_callable();
             let signal_thread = std::thread::spawn(move || {
-                if signals.forever().next().is_some() {
-                    if let Err(error) = unmounter.unmount() {
-                        eprintln!("unmount failed: {error}");
-                    }
+                if signals.forever().next().is_some()
+                    && let Err(error) = unmounter.unmount()
+                {
+                    eprintln!("unmount failed: {error}");
                 }
             });
             let result = session.run();
