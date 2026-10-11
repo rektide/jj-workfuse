@@ -6,6 +6,7 @@ Run after `cargo build`: python3 examples/smoke.py [--fuse].
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,12 +42,16 @@ def main():
         env = {**os.environ, "JJ_CONFIG": str(config), "JJ_CONFIG_NO_DEFAULT": "1"}
         run("jj", "git", "init", repo, env=env)
         (repo / "plugin").mkdir()
-        (repo / "plugin/index.cjs").write_text("module.exports = { answer: 42 };\n")
+        (repo / "plugin/nested").mkdir()
+        entry = b'module.exports = { answer: require("./nested/helper.cjs") };\n'
+        (repo / "plugin/index.cjs").write_bytes(entry)
+        (repo / "plugin/nested/helper.cjs").write_text("module.exports = 42;\n")
         (repo / "plugin/run").write_text("#!/bin/sh\nprintf 'workfuse\\n'\n")
         (repo / "plugin/run").chmod(0o755)
         (repo / "plugin/link").symlink_to("index.cjs")
         (repo / "unrelated").mkdir()
-        (repo / "unrelated/payload").write_bytes(b"unrelated\n" * 100_000)
+        outside = b"unrelated\n" * 100_000
+        (repo / "unrelated/payload").write_bytes(outside)
         run("jj", "commit", "-m", "unmaterialized plugin fixture", cwd=repo, env=env)
         revision = run("jj", "log", "--no-graph", "-r", "@-", "-T", "commit_id", cwd=repo, env=env).decode().strip()
         run("jj", "new", "root()", cwd=repo, env=env)
@@ -57,9 +62,17 @@ def main():
         provenance = json.loads(run(binary, "inspect", *select))
         assert provenance["source_commit"] == revision
         assert provenance["root"]["kind"] == "directory"
-        assert run(binary, "cat", *select, "index.cjs") == b"module.exports = { answer: 42 };\n"
+        assert run(binary, "cat", *select, "index.cjs") == entry
+        entries = json.loads(run(binary, "ls", *select))
+        assert [e["path"] for e in entries] == ["index.cjs", "link", "nested", "run"]
+        index_id = entries[0]["terms"][0]["id"]
+        assert run(binary, "object", *select, "--kind", "file", "--id", index_id) == entry
         objects = json.loads(run(binary, "objects", *select))
-        assert len(objects) == 4  # One tree, two files, one symlink.
+        assert len(objects) == 6  # Two trees, three files, one symlink.
+        outside_id = hashlib.sha1(f"blob {len(outside)}\0".encode() + outside).hexdigest()
+        denied = subprocess.run([str(binary), "object", *map(str, select), "--kind", "file", "--id", outside_id], capture_output=True, timeout=30)
+        assert denied.returncode != 0 and denied.stdout == b""
+        assert b"not reachable" in denied.stderr
         history = json.loads(run(binary, "history", *select))
         assert history[-1]["source_commit"] == revision
         assert history[-1]["id"].startswith("wf-commit-v1:")
@@ -77,8 +90,8 @@ def main():
                     if time.monotonic() >= deadline:
                         raise RuntimeError("FUSE mount did not become ready")
                     time.sleep(0.02)
-                assert (mount / "index.cjs").read_bytes() == b"module.exports = { answer: 42 };\n"
-                assert sorted(p.name for p in mount.iterdir()) == ["index.cjs", "link", "run"]
+                assert (mount / "index.cjs").read_bytes() == entry
+                assert sorted(p.name for p in mount.iterdir()) == ["index.cjs", "link", "nested", "run"]
                 assert (mount / "link").read_bytes() == (mount / "index.cjs").read_bytes()
                 assert os.readlink(mount / "link") == "index.cjs"
                 assert run(mount / "run") == b"workfuse\n"

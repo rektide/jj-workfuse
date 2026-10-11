@@ -10,6 +10,7 @@ use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
+use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
@@ -247,6 +248,21 @@ fn history_retains_outside_only_vertices_and_boundary_deletions() -> Result<()> 
         p.history(100)?.last().unwrap().id,
         history.last().unwrap().id
     );
+    let returned_tree = f.tree(
+        c.tree(),
+        vec![
+            ("moved-x", None),
+            ("plugin/x", Some(f.file("plugin/x", b"x", false)?)),
+        ],
+    )?;
+    let returned = f.commit(std::slice::from_ref(&c), returned_tree)?;
+    let returned_history = f.projection(&returned, "plugin")?.history(100)?;
+    assert_eq!(returned_history.len(), 5);
+    assert_eq!(returned_history.last().unwrap().tree, history[1].tree);
+    assert_eq!(
+        returned_history.last().unwrap().changed_from_parents,
+        [true]
+    );
     Ok(())
 }
 
@@ -275,6 +291,7 @@ fn merges_preserve_topology_and_conflict_evidence_without_selecting_a_side() -> 
             right.tree_ids().as_resolved().unwrap().clone(),
         ]);
         let merge_tree = MergedTree::new(f.repo.store().clone(), ids, ConflictLabels::unlabeled());
+        let source_parents = [left.id().hex(), right.id().hex()];
         let merge = f.commit(&[left, right], merge_tree)?;
         let p = f.projection(&merge, "plugin")?;
         assert_eq!(p.entry("x")?.kind, "conflict");
@@ -297,6 +314,21 @@ fn merges_preserve_topology_and_conflict_evidence_without_selecting_a_side() -> 
         let history = p.history(100)?;
         assert_eq!(history.len(), 5);
         assert_eq!(history.last().unwrap().parents.len(), 2);
+        let projected_parent_sources: Vec<_> = history
+            .last()
+            .unwrap()
+            .parents
+            .iter()
+            .map(|parent| {
+                history
+                    .iter()
+                    .find(|vertex| &vertex.id == parent)
+                    .unwrap()
+                    .source_commit
+                    .clone()
+            })
+            .collect();
+        assert_eq!(projected_parent_sources, source_parents);
         let mut fs = ReadOnlyFs::new(p, 4096, 1, 1)?;
         let ino = fs.lookup(1, "x".as_ref()).unwrap();
         assert_eq!(fs.getattr(ino).unwrap().size, 0);
@@ -425,4 +457,239 @@ fn reject_path_traversal_and_normalization_ambiguity() {
     }
     assert_eq!(checked_path(".").unwrap(), RepoPathBuf::root());
     assert_eq!(checked_path("").unwrap(), RepoPathBuf::root());
+}
+
+#[test]
+fn missing_unrelated_trees_do_not_affect_the_selected_view() -> Result<()> {
+    let mut f = Fixture::new(false)?;
+    let tree = f.tree(
+        f.repo.store().empty_merged_tree(),
+        vec![
+            ("plugin/x", Some(f.file("plugin/x", b"selected", false)?)),
+            (
+                "outside/deep/secret",
+                Some(f.file("outside/deep/secret", b"outside", false)?),
+            ),
+        ],
+    )?;
+    let commit = f.commit(&[f.repo.store().root_commit()], tree)?;
+    let outside = block_on(commit.tree().path_value(&checked_path("outside")?))?;
+    let Some(Some(TreeValue::Tree(id))) = outside.as_resolved() else {
+        panic!("outside tree");
+    };
+    // Deliberately damage only this fixture's unrelated object. A whole-tree
+    // traversal now fails, making accidental traversal observable.
+    std::fs::remove_file(f.dir.path().join(".jj/repo/store/trees").join(id.hex()))?;
+    let p = f.projection(&commit, "plugin")?;
+    assert_eq!(p.read("x")?, b"selected");
+    assert_eq!(p.list("")?.len(), 1);
+    assert_eq!(p.objects()?.len(), 2);
+    assert_eq!(p.history(100)?.len(), 2);
+    assert!(f.projection(&commit, ".")?.objects().is_err());
+    Ok(())
+}
+
+#[test]
+fn missing_selected_blobs_are_reachable_but_not_available() -> Result<()> {
+    let mut f = Fixture::new(false)?;
+    let value = f.file("plugin/x", b"selected", false)?;
+    let TreeValue::File { ref id, .. } = value else {
+        unreachable!()
+    };
+    let key = ObjectKey {
+        kind: ObjectKind::File,
+        id: id.hex(),
+    };
+    let tree = f.tree(
+        f.repo.store().empty_merged_tree(),
+        vec![("plugin/x", Some(value))],
+    )?;
+    let commit = f.commit(&[f.repo.store().root_commit()], tree)?;
+    std::fs::remove_file(f.dir.path().join(".jj/repo/store/files").join(&key.id))?;
+    let p = f.projection(&commit, "plugin")?;
+    assert!(p.objects()?.contains(&key));
+    assert!(p.read_object(&key).is_err());
+    let mut fs = ReadOnlyFs::new(p, 100, 1, 1)?;
+    assert_eq!(fs.readdir(1).unwrap().len(), 3);
+    let ino = fs.lookup(1, "x".as_ref()).unwrap();
+    assert_eq!(fs.getattr(ino).unwrap_err(), libc::EIO);
+    assert_eq!(fs.read(ino, 0, 20), Err(libc::EIO));
+    Ok(())
+}
+
+#[test]
+fn outside_conflicts_resolve_out_of_scope_and_delete_modify_stays_conflicted() -> Result<()> {
+    let mut f = Fixture::new(true)?;
+    let tree = f.tree(
+        f.repo.store().empty_merged_tree(),
+        vec![
+            ("plugin/x", Some(f.file("plugin/x", b"inside", false)?)),
+            ("outside", Some(f.file("outside", b"base", false)?)),
+        ],
+    )?;
+    let base = f.commit(&[f.repo.store().root_commit()], tree)?;
+    let tree = f.tree(
+        base.tree(),
+        vec![("outside", Some(f.file("outside", b"left", false)?))],
+    )?;
+    let left = f.commit(std::slice::from_ref(&base), tree)?;
+    let tree = f.tree(
+        base.tree(),
+        vec![("outside", Some(f.file("outside", b"right", false)?))],
+    )?;
+    let right = f.commit(std::slice::from_ref(&base), tree)?;
+    let tree = MergedTree::new(
+        f.repo.store().clone(),
+        Merge::from_vec(vec![
+            left.tree_ids().as_resolved().unwrap().clone(),
+            base.tree_ids().as_resolved().unwrap().clone(),
+            right.tree_ids().as_resolved().unwrap().clone(),
+        ]),
+        ConflictLabels::unlabeled(),
+    );
+    let merged = f.commit(&[left, right], tree)?;
+    let p = f.projection(&merged, "plugin")?;
+    assert_eq!(
+        p.provenance().projected_tree,
+        f.projection(&base, "plugin")?.provenance().projected_tree
+    );
+    assert_eq!(p.entry("x")?.kind, "file");
+    assert_eq!(p.objects()?.len(), 2);
+    assert_eq!(
+        p.history(100)?.last().unwrap().changed_from_parents,
+        [false, false]
+    );
+    let tree = f.tree(base.tree(), vec![("plugin/x", None)])?;
+    let deleted = f.commit(std::slice::from_ref(&base), tree)?;
+    let tree = f.tree(
+        base.tree(),
+        vec![("plugin/x", Some(f.file("plugin/x", b"modified", false)?))],
+    )?;
+    let modified = f.commit(std::slice::from_ref(&base), tree)?;
+    let tree = MergedTree::new(
+        f.repo.store().clone(),
+        Merge::from_vec(vec![
+            deleted.tree_ids().as_resolved().unwrap().clone(),
+            base.tree_ids().as_resolved().unwrap().clone(),
+            modified.tree_ids().as_resolved().unwrap().clone(),
+        ]),
+        ConflictLabels::unlabeled(),
+    );
+    let merged = f.commit(&[deleted, modified], tree)?;
+    let p = f.projection(&merged, "plugin")?;
+    let entry = p.entry("x")?;
+    assert_eq!(entry.kind, "conflict");
+    assert!(entry.terms.iter().any(Option::is_none));
+    assert!(p.read("x").is_err());
+    Ok(())
+}
+
+#[test]
+fn real_second_workspace_resolves_its_own_at_and_old_views_remain_pinned() -> Result<()> {
+    let mut f = Fixture::new(true)?;
+    let tree = f.tree(
+        f.repo.store().empty_merged_tree(),
+        vec![("plugin/x", Some(f.file("plugin/x", b"first", false)?))],
+    )?;
+    let first = f.commit(&[f.repo.store().root_commit()], tree)?;
+    let second_dir = tempfile::tempdir()?;
+    let factory = jj_lib::default_backend_factories::default_working_copy_factory();
+    let (_workspace, repo) = block_on(Workspace::init_workspace_with_existing_repo(
+        second_dir.path(),
+        &f.dir.path().join(".jj/repo"),
+        &f.repo,
+        factory.as_ref(),
+        WorkspaceNameBuf::from("second"),
+    ))?;
+    f.repo = repo;
+    let mut tx = f.repo.start_transaction();
+    tx.repo_mut()
+        .set_wc_commit(WorkspaceNameBuf::from("second"), first.id().clone())?;
+    f.repo = block_on(tx.commit("point second workspace at first fixture"))?;
+    let source = SourceRepo::open(second_dir.path(), None)?;
+    let old = source.project("@", "plugin")?;
+    assert_eq!(old.read("x")?, b"first");
+    let tree = f.tree(
+        first.tree(),
+        vec![("plugin/x", Some(f.file("plugin/x", b"new", false)?))],
+    )?;
+    let new = f.commit(std::slice::from_ref(&first), tree)?;
+    let mut tx = f.repo.start_transaction();
+    tx.repo_mut()
+        .set_wc_commit(WorkspaceNameBuf::from("second"), new.id().clone())?;
+    f.repo = block_on(tx.commit("advance second workspace"))?;
+    assert_eq!(old.read("x")?, b"first");
+    assert_eq!(source.project("@", "plugin")?.read("x")?, b"first");
+    assert_eq!(
+        SourceRepo::open(second_dir.path(), None)?
+            .project("@", "plugin")?
+            .read("x")?,
+        b"new"
+    );
+    assert_eq!(
+        SourceRepo::open(&f.dir.path().join(".jj/repo"), Some("second"))?
+            .project("@", "plugin")?
+            .read("x")?,
+        b"new"
+    );
+    assert!(!second_dir.path().join("plugin").exists());
+    assert!(!f.dir.path().join("plugin").exists());
+    Ok(())
+}
+
+#[test]
+fn concurrent_operations_fail_without_reconciliation() -> Result<()> {
+    let f = Fixture::new(true)?;
+    let tx1 = f.repo.start_transaction();
+    let tx2 = f.repo.start_transaction();
+    block_on(tx1.commit("first concurrent operation"))?;
+    block_on(tx2.commit("second concurrent operation"))?;
+    assert_eq!(
+        block_on(f.repo.loader().op_heads_store().get_op_heads())?.len(),
+        2
+    );
+    let error = SourceRepo::open(f.dir.path(), None)
+        .err()
+        .expect("must reject concurrent heads");
+    assert!(error.to_string().contains("operation head"));
+    assert_eq!(
+        block_on(f.repo.loader().op_heads_store().get_op_heads())?.len(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn external_git_store_works_without_working_copy_metadata() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let git_dir = tempfile::tempdir()?;
+    gix::init_bare(git_dir.path())?;
+    let settings = UserSettings::from_config_and_home_dir(StackedConfig::with_defaults(), None)?;
+    let (_workspace, repo) = block_on(Workspace::init_external_git(
+        &settings,
+        dir.path(),
+        git_dir.path(),
+    ))?;
+    let mut f = Fixture { dir, repo };
+    let tree = f.tree(
+        f.repo.store().empty_merged_tree(),
+        vec![(
+            "plugin/x",
+            Some(f.file("plugin/x", b"external store", false)?),
+        )],
+    )?;
+    let commit = f.commit(&[f.repo.store().root_commit()], tree)?;
+    // Preserve the fixture's WC metadata under an unused name to prove that
+    // SourceRepo's direct-store path never requires it.
+    std::fs::rename(
+        f.dir.path().join(".jj/working_copy"),
+        f.dir.path().join(".jj/unused-working-copy"),
+    )?;
+    let p = SourceRepo::open(&f.dir.path().join(".jj/repo"), None)?
+        .project(&commit.id().hex(), "plugin")?;
+    assert_eq!(p.read("x")?, b"external store");
+    assert_eq!(p.objects()?.len(), 2);
+    assert!(!f.dir.path().join("plugin").exists());
+    assert!(!git_dir.path().join("plugin").exists());
+    Ok(())
 }

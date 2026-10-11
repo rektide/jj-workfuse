@@ -20,6 +20,11 @@ and write history. Concurrent operation heads are an error requiring explicit
 reconciliation with jj. A revision must evaluate to exactly one commit. Built-in
 revset syntax is available, but user/repository jj configuration and aliases are
 not loaded; user-relative predicates consequently use jj-lib's default user.
+Revsets are evaluated against the original source repository before projection:
+explicit content/diff predicates can consequently read outside the selected
+subtree during **revision resolution**. Use an ID/bookmark/simple graph revset
+when minimizing source reads. This never grants those outside objects to the
+projected object API.
 
 After selection, the commit and operation are fixed even if bookmarks/workspaces
 move. This is a committed object-store view, not a view of unsnapshotted source
@@ -77,6 +82,9 @@ available in the repository. A source object used both inside and outside the
 scope is valid if it has an occurrence inside. Symlink targets, copy-history
 provenance and Git submodule commit IDs never grant traversal into another scope
 or repository. Their references are not recursively followed.
+Selecting `.` intentionally grants the complete selected root, not its ancestor
+commits. Native backend integrity checks are used; there is no independent
+rehashing verifier in this initial projection layer.
 
 `object --kind ... --id ...` / `read_object()` first prove reachability in this
 projection. A hex ID available elsewhere in the store is rejected. File/symlink
