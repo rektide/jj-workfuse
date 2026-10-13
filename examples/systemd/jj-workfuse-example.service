@@ -1,0 +1,38 @@
+# A concrete, ready-to-edit mount unit (user scope). It exposes the plugin/
+# subtree of the pinned main revision of ~/src/opencode-cbirds read-only at
+# ~/mnt/cbirds-plugin — the motivating case from the README.
+#
+# Install:
+#   cp examples/systemd/jj-workfuse-example.service ~/.config/systemd/user/
+#   mkdir -p ~/mnt/cbirds-plugin        # must exist and be empty
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now jj-workfuse-example
+#   systemctl --user status jj-workfuse-example
+#
+# Adjust the four %h/... paths below for your repository, mountpoint, and
+# binary location. %h expands to the user's home directory. See
+# examples/systemd/README.md for the full JJ_WORKFUSE_* variable reference
+# and the system-scope template alternative.
+
+[Unit]
+Description=jj-workfuse read-only mount of opencode-cbirds plugin/
+Documentation=file:/usr/share/doc/jj-workfuse/README.md
+# Wait for the storage holding the source repository before starting.
+RequiresMountsFor=%h/src/opencode-cbirds
+
+[Service]
+Type=notify
+Environment=JJ_WORKFUSE_REPOSITORY=%h/src/opencode-cbirds
+Environment=JJ_WORKFUSE_REVISION=main
+Environment=JJ_WORKFUSE_SUBDIR=plugin
+Environment=JJ_WORKFUSE_MOUNTPOINT=%h/mnt/cbirds-plugin
+ExecStart=%h/.local/bin/jj-workfuse mount
+# Sweep a disconnected mount left by SIGKILL; "-" ignores "not mounted".
+ExecStopPost=-/usr/bin/fusermount3 -u ${JJ_WORKFUSE_MOUNTPOINT}
+Restart=on-failure
+RestartSec=2s
+# Do not add PrivateTmp/PrivateMounts/ProtectSystem here: the service must
+# stay in the session mount namespace or the mount becomes unit-private.
+
+[Install]
+WantedBy=default.target

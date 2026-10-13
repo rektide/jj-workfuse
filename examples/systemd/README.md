@@ -46,6 +46,14 @@ mount exists; only then does `READY=1` flip it to `active`. Units that need
 the mounted tree can order themselves with `After=`/`Requires=` on this
 service.
 
+## A concrete single unit
+
+[`jj-workfuse-example.service`](jj-workfuse-example.service) is a filled-in,
+user-scope mount for the README's motivating case (the `plugin/` subtree of
+`opencode-cbirds`). Copy it to `~/.config/systemd/user/`, edit the four
+paths, and enable it — no EnvironmentFile needed. Use the `@.service`
+templates below instead when you want configuration kept out of the unit.
+
 ## Installing a persistent mount (system scope)
 
 1. Place the binary where units can see it, e.g. `/usr/local/bin/jj-workfuse`.

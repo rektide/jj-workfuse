@@ -51,7 +51,7 @@ The mount command is a well-behaved service process: foreground by design,
 `sd_notify` `READY=1` with the pinned provenance exactly when the kernel
 mount exists — so `Type=notify` units order dependents correctly and start
 failures (unresolvable revision, non-empty mountpoint) show up as real unit
-failures. Instance templates and a full guide live in
+failures. A filled-in example unit and instance templates live in
 [examples/systemd](examples/systemd/README.md); a quick test:
 
 ```sh

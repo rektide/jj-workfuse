@@ -151,7 +151,9 @@ The end-to-end systemd run on transient and template units verified:
    `Result=success`, mount gone.
 4. The linked `jj-workfuse-user@sdverify` instance template, configured
    solely through `~/.config/jj-workfuse/sdverify.conf`, mounts and stops
-   the same way.
+   the same way. The shipped concrete `jj-workfuse-example.service`, with
+   only its paths rewritten for the fixture, was verified the same way
+   (active, correct content, clean stop).
 5. A unit with an unresolvable revision ends `failed`, not `active` —
    startup failures are visible to the service manager.
 
