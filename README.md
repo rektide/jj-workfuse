@@ -39,6 +39,29 @@ The process stays in the foreground. Ctrl-C/SIGTERM unmounts; another terminal
 can use `fusermount3 -u ~/mnt/cbirds-plugin`. The mountpoint must be empty. Put
 build outputs and installed dependencies outside the read-only view.
 
+Every selection and mount option also reads a `JJ_WORKFUSE_*` environment
+variable (`REPOSITORY`, `REVISION`, `SUBDIR`, `WORKSPACE`, `MOUNTPOINT`,
+`CACHE_MIB`); explicit CLI arguments win. This exists for service managers,
+see below.
+
+## Running under systemd
+
+The mount command is a well-behaved service process: foreground by design,
+`SIGTERM` (systemd's stop signal) unmounts and exits `0`, and it sends
+`sd_notify` `READY=1` with the pinned provenance exactly when the kernel
+mount exists — so `Type=notify` units order dependents correctly and start
+failures (unresolvable revision, non-empty mountpoint) show up as real unit
+failures. Instance templates and a full guide live in
+[examples/systemd](examples/systemd/README.md); a quick test:
+
+```sh
+systemd-run --user --unit=jjwf-demo -p Type=notify \
+  -p Environment=JJ_WORKFUSE_REPOSITORY=$HOME/src/opencode-cbirds \
+  -p Environment=JJ_WORKFUSE_REVISION=main -p Environment=JJ_WORKFUSE_SUBDIR=plugin \
+  -p Environment=JJ_WORKFUSE_MOUNTPOINT=$HOME/mnt/cbirds-plugin \
+  target/release/jj-workfuse mount
+```
+
 The mount exposes `plugin/` as its root, preserving executable bits and recorded
 symlink targets. It lazily traverses selected trees and reads requested blobs;
 there is no hidden checkout. **The selected revision need not be materialized.**

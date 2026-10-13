@@ -171,5 +171,8 @@ bookmark follow mode, history simplification, remote fetching, submodule mounts,
 conflict-marker materialization, xattrs, durable inodes and a synthetic repository
 format are not implemented. All mount options are read-only, nodev, nosuid and
 kernel permission checks; allow-other is not enabled. The CLI runs in the
-foreground and unmounts on SIGINT/SIGTERM or external `fusermount3 -u`. SIGKILL
-can leave a disconnected mount requiring explicit unmount.
+foreground and unmounts on SIGINT/SIGTERM or external `fusermount3 -u`; under
+a service manager it reports sd_notify `READY=1` with the pinned provenance
+once the kernel mount exists, so `Type=notify` units gate dependents on real
+mount availability. SIGKILL can leave a disconnected mount requiring explicit
+unmount; systemd unit templates sweep that with `ExecStopPost`.

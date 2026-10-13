@@ -99,3 +99,62 @@ sandboxed, missing objects are not fetched, mounts do not protect source objects
 against GC, file-size attributes scan the requested file, and the content-cache
 budget excludes native/backend/kernel and visited-metadata caches. Writable
 overlays, write-back, follow mode and synthetic repository import are deferred.
+
+# systemd mount verification
+
+Recorded 2026-10-13 in OpenCode session
+`ses_ec986219cffeQE1QLBePfSdEBj` (shiny-harbor).
+
+## Expected help and actual result
+
+The question was whether the mount command can serve as a systemd-managed
+mount. The implemented result: yes — as `Type=notify` service units, with
+`READY=1`/`STATUS` sent over sd_notify once the kernel mount exists,
+`SIGTERM` stops unmounting cleanly with exit status 0, and configuration
+available through `JJ_WORKFUSE_*` environment variables for
+`EnvironmentFile`-driven instance templates ([unit
+templates](../examples/systemd/README.md)). The sd_notify client is
+dependency-free (raw libc AF_UNIX, abstract namespace and SOCK_STREAM
+fallback) and covered by unit tests; no `mount.fuse` helper or fstab
+mechanism is used.
+
+## Environment
+
+- systemd 262 (user manager running); `/dev/fuse` and `fusermount3` present.
+- Fixture repos created by the jj CLI under `/tmp/opencode`; selected
+  revisions left unmaterialized the same way `examples/smoke.py` does.
+- Scratch script: `.test-agent/systemd-mount/verify.sh` (gitignored
+  evidence, not product).
+
+## Checks run successfully
+
+```sh
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --check
+cargo build --release --locked
+.test-agent/systemd-mount/verify.sh target/release/jj-workfuse
+```
+
+**17 Rust tests passed** (15 prior plus 2 notify tests: address parsing for
+abstract/pathname forms; no-op without `NOTIFY_SOCKET` and real datagram
+delivery to a bound abstract socket).
+
+The end-to-end systemd run on transient and template units verified:
+
+1. A `systemd-run --user -p Type=notify` unit reaches `active` only after
+   the projection resolves and the kernel mount exists; `Status:` shows the
+   pinned commit, subdir, mountpoint and source operation.
+2. `findmnt` reports `fuse.jj-workfuse`; mounted file bytes, symlink target
+   follow, executable bit and subtree-only listing all match.
+3. `systemctl --user stop` sends SIGTERM: clean unmount, `ExecMainStatus=0`,
+   `Result=success`, mount gone.
+4. The linked `jj-workfuse-user@sdverify` instance template, configured
+   solely through `~/.config/jj-workfuse/sdverify.conf`, mounts and stops
+   the same way.
+5. A unit with an unresolvable revision ends `failed`, not `active` —
+   startup failures are visible to the service manager.
+
+No system configuration, user unit directories, or live repositories were
+left modified; the script unlinks its transient/template units, removes its
+config file, and deletes its fixtures.
