@@ -1,0 +1,27 @@
+# User-scope instance template: one jj-workfuse mount per instance name,
+# no root required (needs fusermount3 and /dev/fuse like any terminal mount).
+#
+# Install as ~/.config/systemd/user/jj-workfuse-user@.service and configure
+# each instance through ~/.config/jj-workfuse/<name>.conf, then
+#   systemctl --user enable --now jj-workfuse-user@<name>
+# See examples/systemd/README.md for the variable reference.
+
+[Unit]
+Description=jj-workfuse read-only mount (%i)
+Documentation=file:/usr/share/doc/jj-workfuse/README.md
+# Order after the storage holding the source repository, e.g. for /home:
+# RequiresMountsFor=/home
+
+[Service]
+Type=notify
+EnvironmentFile=%h/.config/jj-workfuse/%i.conf
+ExecStart=%h/.local/bin/jj-workfuse mount
+# Sweep a disconnected mount left by SIGKILL; "-" ignores "not mounted".
+ExecStopPost=-/usr/bin/fusermount3 -u ${JJ_WORKFUSE_MOUNTPOINT}
+Restart=on-failure
+RestartSec=2s
+# Do not add PrivateTmp/PrivateMounts/ProtectSystem here: the service must
+# stay in the session mount namespace or the mount becomes unit-private.
+
+[Install]
+WantedBy=default.target
