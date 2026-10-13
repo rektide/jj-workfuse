@@ -20,15 +20,16 @@ struct Cli {
 #[derive(Args)]
 struct Selection {
     /// A jj workspace/path beneath it, .jj, or .jj/repo metadata directory
+    #[arg(env = "JJ_WORKFUSE_REPOSITORY")]
     repository: PathBuf,
     /// Built-in jj revset selecting exactly one commit; no snapshot is taken
-    #[arg(long, default_value = "@")]
+    #[arg(long, default_value = "@", env = "JJ_WORKFUSE_REVISION")]
     revision: String,
     /// Normalized source directory relative to the repository root
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", env = "JJ_WORKFUSE_SUBDIR")]
     subdir: String,
     /// Workspace identity for @ when opening metadata without a workspace
-    #[arg(long)]
+    #[arg(long, env = "JJ_WORKFUSE_WORKSPACE")]
     workspace: Option<String>,
 }
 
@@ -46,9 +47,10 @@ enum Command {
         #[command(flatten)]
         selection: Selection,
         /// Existing empty directory, separate from source repository metadata
+        #[arg(env = "JJ_WORKFUSE_MOUNTPOINT")]
         mountpoint: PathBuf,
         /// Maximum retained file-content cache in MiB (not jj metadata caches)
-        #[arg(long, default_value_t = 64)]
+        #[arg(long, default_value_t = 64, env = "JJ_WORKFUSE_CACHE_MIB")]
         cache_mib: usize,
     },
     /// Print pinned provenance and selected-root state as JSON, without blobs
@@ -160,11 +162,17 @@ fn main() -> Result<()> {
                 .context("cache budget overflow")?;
             let uid = nix::unistd::geteuid().as_raw();
             let gid = nix::unistd::getegid().as_raw();
-            eprintln!(
-                "Pinned {}:{} at source operation {}\nProjected tree {}\nMounting {} (read-only); Ctrl-C or fusermount3 -u to unmount",
+            // Flattened for the sd_notify STATUS line; newlines would corrupt
+            // the key=value protocol, and arbitrary paths choose the rest.
+            let flat = |value: String| value.replace('\n', " ");
+            let pinned = format!(
+                "pinned {}:{}",
                 projection.provenance().source_commit,
-                projection.provenance().subdir,
-                projection.provenance().source_operation,
+                flat(projection.provenance().subdir.clone()),
+            );
+            let source_operation = flat(projection.provenance().source_operation.clone());
+            eprintln!(
+                "{pinned} at source operation {source_operation}\nProjected tree {}\nMounting {} (read-only); Ctrl-C or fusermount3 -u to unmount",
                 projection.provenance().projected_tree,
                 mountpoint.display()
             );
@@ -186,6 +194,16 @@ fn main() -> Result<()> {
             let mut session = fuser::Session::new(fs, &mountpoint, &options).context(
                 "FUSE mount failed; check /dev/fuse, fusermount3, and host mount permissions",
             )?;
+            // The mount is established once Session::new returns, so this is
+            // the correct readiness point for Type=notify service units. A
+            // delivery failure is loud but not fatal: the mount works.
+            let status = format!(
+                "READY=1\nSTATUS={pinned} at {} (source operation {source_operation})",
+                flat(mountpoint.display().to_string()),
+            );
+            if let Err(error) = jj_workfuse::notify::notify(&status) {
+                eprintln!("warning: service-manager readiness notification failed: {error}");
+            }
             let mut unmounter = session.unmount_callable();
             let signal_thread = std::thread::spawn(move || {
                 if signals.forever().next().is_some()
